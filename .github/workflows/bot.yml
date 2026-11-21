@@ -2,8 +2,19 @@ name: trading-bot
 
 on:
   workflow_dispatch:
+    inputs:
+      summary:
+        description: "Kirim ringkasan sekarang (1 = ya)"
+        default: "0"
   schedule:
     - cron: "5 */4 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: trading-bot
+  cancel-in-progress: false
 
 jobs:
   run:
@@ -19,3 +30,10 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SEND_SUMMARY: ${{ inputs.summary }}
+      - name: Simpan state
+        run: |
+          git config user.name "bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add state.json
+          git diff --staged --quiet || (git commit -m "update state" && git push)
