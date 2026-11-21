@@ -1,0 +1,5 @@
+{
+  "modal_idr": [500000, 1000000, 2500000, 5000000],
+  "risk_pct": 1,
+  "kurs_manual": null
+}
