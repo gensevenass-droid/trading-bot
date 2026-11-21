@@ -7,7 +7,7 @@ on:
         description: "Kirim ringkasan sekarang (1 = ya)"
         default: "0"
   schedule:
-    - cron: "5 */4 * * *"
+    - cron: "*/15 * * * *"
 
 permissions:
   contents: write
@@ -19,6 +19,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
