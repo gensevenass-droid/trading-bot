@@ -14,8 +14,10 @@ SYMBOLS = {
     "BNB": "BNB/USDT",
     "EMAS (PAXG)": "PAXG/USDT",
 }
-PRIMARY = os.environ.get("PRIMARY_EXCHANGE", "bybit").strip() or "bybit"
-EXCHANGES = [PRIMARY] + [e for e in ("bybit", "kucoin", "okx") if e != PRIMARY]
+PRIMARY = os.environ.get("PRIMARY_EXCHANGE", "okx").strip() or "okx"
+EXCHANGES = [PRIMARY] + [
+    e for e in ("okx", "kucoin", "bitget", "gate", "mexc") if e != PRIMARY
+]
 MARKET = os.environ.get("MARKET", "spot").strip() or "spot"
 MIN_SCORE = 4
 COOLDOWN_CANDLES = 3
@@ -27,19 +29,28 @@ WIB = timezone(timedelta(hours=7))
 H4_MS = 4 * 60 * 60 * 1000
 
 
-def get_exchange():
+_EX_CACHE = {}
+
+
+def get_exchange_for(symbol):
     for name in EXCHANGES:
+        if name in _EX_CACHE and _EX_CACHE[name] is None:
+            continue
         try:
-            opts = {"enableRateLimit": True}
-            if MARKET == "swap":
-                opts["options"] = {"defaultType": "swap"}
-            ex = getattr(ccxt, name)(opts)
-            ex.load_markets()
-            print(f"Exchange dipakai: {name}")
-            return ex
+            if name not in _EX_CACHE:
+                opts = {"enableRateLimit": True}
+                if MARKET == "swap":
+                    opts["options"] = {"defaultType": "swap"}
+                ex = getattr(ccxt, name)(opts)
+                ex.load_markets()
+                _EX_CACHE[name] = ex
+            ex = _EX_CACHE[name]
+            if symbol in ex.markets:
+                return ex
         except Exception as e:
             print(f"{name} gagal: {e}")
-    sys.exit("Semua exchange gagal.")
+            _EX_CACHE[name] = None
+    return None
 
 
 def fetch_closed(ex, symbol, tf, limit=300):
@@ -306,7 +317,6 @@ def send_telegram(text):
 
 
 def main():
-    ex = get_exchange()
     state = load_state()
     state.setdefault("alerts", {})
     summaries = []
@@ -315,15 +325,16 @@ def main():
         try:
             if MARKET == "swap" and ":" not in symbol:
                 symbol = symbol + ":USDT"
-            if symbol not in ex.markets:
-                summaries.append(f"{name}: pair {symbol} tidak ada di {ex.id}")
+            ex = get_exchange_for(symbol)
+            if ex is None:
+                summaries.append(f"{name}: pair {symbol} tidak ada di exchange yang bisa diakses")
                 continue
             live = float(ex.fetch_ticker(symbol)["last"])
             daily = fetch_closed(ex, symbol, "1d")
             h4 = fetch_closed(ex, symbol, "4h")
             zones = find_zones(daily) + load_manual_zones(name.split()[0])
             summary, alert = evaluate(name, h4, zones)
-            summaries.append(summary + f" | live {fmt(live)}")
+            summaries.append(summary + f" | live {fmt(live)} [{ex.id}]")
             summaries.extend(nearest_zones(zones, live))
             if alert:
                 entry_txt = alert["text"]
@@ -345,7 +356,7 @@ def main():
     if state.get("heartbeat") != today or os.environ.get("SEND_SUMMARY") == "1":
         msg = [
             "BOT AKTIF - ringkasan H4",
-            f"Sumber data: {ex.id} ({MARKET})",
+            f"Sumber utama: {PRIMARY} ({MARKET}). Tanda [ ] = exchange yang dipakai per aset",
             "close H4 = harga penutupan candle terakhir, bukan harga live",
             f"Setup terkirim run ini: {sent}",
             "",
