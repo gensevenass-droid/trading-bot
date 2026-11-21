@@ -1,6 +1,8 @@
+import html
 import json
 import math
 import os
+import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 
@@ -50,6 +52,8 @@ FEE_ROUNDTRIP = 0.001
 STATE_FILE = "state.json"
 JOURNAL_FILE = "journal.json"
 EXPIRE_CANDLES = 30
+RETEST_MAX_AGE = 12
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
 ZONES_FILE = "zones.json"
 WIB = timezone(timedelta(hours=7))
 H4_MS = 4 * 60 * 60 * 1000
@@ -208,25 +212,70 @@ def engulfing(prev, c):
     return None
 
 
+def _idn(s):
+    return s.replace(",", "\u00a7").replace(".", ",").replace("\u00a7", ".")
+
+
 def fmt(x):
-    return f"{x:,.2f}"
+    ax = abs(x)
+    d = 0 if ax >= 10000 else 1 if ax >= 1000 else 2 if ax >= 1 else 4
+    return _idn(f"{x:,.{d}f}")
+
+
+def num(x, d=2):
+    return _idn(f"{x:.{d}f}")
+
+
+def pct(x, d=1, sign=False):
+    return _idn(f"{x:+.{d}f}" if sign else f"{x:.{d}f}") + "%"
+
+
+def esc(x):
+    return html.escape(str(x), quote=False)
 
 
 def rupiah(x):
     return "Rp" + f"{round(x):,}".replace(",", ".")
 
 
+def rp_short(x):
+    sign = "-" if x < 0 else ""
+    x = abs(x)
+    if x >= 1e6:
+        v = f"{x / 1e6:.2f}".rstrip("0").rstrip(".")
+        return f"{sign}Rp{v.replace('.', ',')}jt"
+    if x >= 1e5:
+        return f"{sign}Rp{x / 1e3:.0f}rb"
+    if x >= 1e3:
+        v = f"{x / 1e3:.1f}".rstrip("0").rstrip(".")
+        return f"{sign}Rp{v.replace('.', ',')}rb"
+    return f"{sign}Rp{x:.0f}"
+
+
 def fmt_qty(q):
     if q < 0.01:
-        return f"{q:.5f}"
+        return _idn(f"{q:.5f}")
     if q < 1:
-        return f"{q:.4f}"
-    return f"{q:.3f}"
+        return _idn(f"{q:.4f}")
+    return _idn(f"{q:.3f}")
 
 
-def zone_text(z):
-    tag = "lemah 1x" if z.get("weak") else f"{z['touches']}x"
-    return f"{fmt(z['low'])} - {fmt(z['high'])} ({tag}, {z['src']})"
+def id_date(dt):
+    return f"{dt.day} {MONTHS[dt.month - 1]} {dt:%H:%M}"
+
+
+def bar(n, total):
+    filled = max(0, min(total, round(n)))
+    return "\u25b0" * filled + "\u25b1" * (total - filled)
+
+
+def zone_range(z):
+    return f"{fmt(z['low'])}\u2013{fmt(z['high'])}"
+
+
+def zone_short(z):
+    tag = "lemah" if z.get("weak") else f"{z['touches']}x"
+    return f"{zone_range(z)} ({tag})"
 
 
 def nearest_zones(zones, last):
@@ -234,54 +283,83 @@ def nearest_zones(zones, last):
     above = [z for z in zones if z["low"] > last]
     below = [z for z in zones if z["high"] < last]
     inside = [z for z in zones if z["low"] <= last <= z["high"]]
-    parts = []
+    out = []
     if above:
-        parts.append("  Resisten: " + zone_text(min(above, key=lambda z: z["low"])))
+        out.append("   \u2b06 " + zone_short(min(above, key=lambda z: z["low"])))
     else:
-        lvl = math.floor(last / step) * step + step
-        parts.append(f"  Resisten: tidak ada zona di data, level bulat {fmt(lvl)}")
+        out.append(f"   \u2b06 {fmt(math.floor(last / step) * step + step)} (level bulat)")
     if inside:
-        parts.append("  Di dalam zona: " + zone_text(inside[0]))
+        out.append(f"   \u23fa di dalam zona {zone_range(inside[0])}")
     if below:
-        parts.append("  Support: " + zone_text(max(below, key=lambda z: z["high"])))
+        out.append("   \u2b07 " + zone_short(max(below, key=lambda z: z["high"])))
     else:
         lvl = math.floor(last / step) * step
         if lvl >= last:
             lvl -= step
-        parts.append(f"  Support: tidak ada zona di data, level bulat {fmt(lvl)}")
-    return parts
+        out.append(f"   \u2b07 {fmt(lvl)} (level bulat)")
+    return out
 
 
-def evaluate(name, h4, zones):
-    close = h4["close"]
-    last = float(close.iloc[-1])
-    e50 = float(ema(close, 50).iloc[-1])
-    e200 = float(ema(close, 200).iloc[-1])
-    rsi_v = float(rsi(close).iloc[-1])
-    atr_v = float(atr(h4).iloc[-1])
-    vol_avg = float(h4["volume"].iloc[-21:-1].mean())
-    c = h4.iloc[-1]
-    prev = h4.iloc[-2]
-    ts = int(c["ts"])
+def make_plan(direction, entry, extreme, atr_v):
+    if direction == "long":
+        sl = extreme - 0.5 * atr_v
+        risk = entry - sl
+    else:
+        sl = extreme + 0.5 * atr_v
+        risk = sl - entry
+    if risk <= 0 or risk / entry * 100 > MAX_RISK_PCT:
+        return None
+    sign = 1 if direction == "long" else -1
+    return {
+        "entry": entry,
+        "sl": sl,
+        "tp1": entry + sign * 1.5 * risk,
+        "tp2": entry + sign * 3.0 * risk,
+        "risk": risk,
+    }
 
-    summary = (
-        f"{name}: close H4 {fmt(last)} | RSI {rsi_v:.0f} | "
-        f"{'di bawah' if last < e200 else 'di atas'} EMA200"
-    )
 
-    pin = pin_bar(c)
-    eng = engulfing(prev, c)
-    direction = None
-    pola = ""
+def room_ok(direction, entry, risk, zones):
+    if direction == "long":
+        gaps = [z["low"] - entry for z in zones if z["low"] > entry]
+    else:
+        gaps = [entry - z["high"] for z in zones if z["high"] < entry]
+    return bool(gaps) and min(gaps) >= 2 * risk
+
+
+def build_alert(kind, direction, ts, title, pola, zone, plan, checks):
+    score = sum(1 for ok, _, _ in checks if ok)
+    if score < MIN_SCORE:
+        return None
+    return {
+        "kind": kind,
+        "direction": direction,
+        "ts": ts,
+        "title": title,
+        "pola": pola,
+        "zone": zone,
+        "checks": checks,
+        "score": score,
+        "entry": plan["entry"],
+        "sl": plan["sl"],
+        "tp1": plan["tp1"],
+        "tp2": plan["tp2"],
+    }
+
+
+def find_bounce(h4, zones, ind):
+    c, prev = h4.iloc[-1], h4.iloc[-2]
+    last, atr_v = ind["last"], ind["atr"]
+    pin, eng = pin_bar(c), engulfing(prev, c)
     if pin == "bull" or eng == "bull":
         direction = "long"
-        pola = " + ".join(p for p, ok in (("Pin bar", pin == "bull"), ("Engulfing", eng == "bull")) if ok)
+        flags = (("Pin bar", pin == "bull"), ("Engulfing", eng == "bull"))
     elif pin == "bear" or eng == "bear":
         direction = "short"
-        pola = " + ".join(p for p, ok in (("Pin bar", pin == "bear"), ("Engulfing", eng == "bear")) if ok)
-    if direction is None or pd.isna(atr_v):
-        return summary, None
-
+        flags = (("Pin bar", pin == "bear"), ("Engulfing", eng == "bear"))
+    else:
+        return None
+    pola = " + ".join(p for p, ok in flags if ok)
     cands = []
     for z in zones:
         if direction == "long" and c["low"] <= z["high"] and c["close"] >= z["low"]:
@@ -289,76 +367,102 @@ def evaluate(name, h4, zones):
         if direction == "short" and c["high"] >= z["low"] and c["close"] <= z["high"]:
             cands.append(z)
     if not cands:
-        return summary, None
+        return None
     z = max(cands, key=lambda zz: zz["touches"])
-
-    entry = last
-    if direction == "long":
-        sl = float(c["low"]) - 0.5 * atr_v
-        risk = entry - sl
-    else:
-        sl = float(c["high"]) + 0.5 * atr_v
-        risk = sl - entry
-    if risk <= 0 or risk / entry * 100 > MAX_RISK_PCT:
-        return summary, None
-    sign = 1 if direction == "long" else -1
-    tp1 = entry + sign * 1.5 * risk
-    tp2 = entry + sign * 3.0 * risk
-
-    if direction == "long":
-        beyond = [zz["low"] - entry for zz in zones if zz["low"] > entry]
-    else:
-        beyond = [entry - zz["high"] for zz in zones if zz["high"] < entry]
-    room = bool(beyond) and min(beyond) >= 2 * risk
-
+    long = direction == "long"
+    plan = make_plan(direction, last, float(c["low"] if long else c["high"]), atr_v)
+    if not plan:
+        return None
+    vol_avg = float(h4["volume"].iloc[-21:-1].mean())
     checks = [
-        ("Searah tren (EMA 200)", (last > e200) if direction == "long" else (last < e200)),
-        ("Posisi terhadap EMA 50 mendukung", (last > e50) if direction == "long" else (last < e50)),
-        ("RSI mendukung (sisi 50)", (rsi_v > 50) if direction == "long" else (rsi_v < 50)),
-        ("Zona kuat (3+ sentuhan atau manual)", z["touches"] >= 3),
-        ("Ruang gerak ke zona lawan minimal 2R", room),
-        ("Volume di atas rata-rata 20 candle", float(c["volume"]) > vol_avg),
+        ((last > ind["e200"]) if long else (last < ind["e200"]), "Searah tren besar", "Melawan tren besar"),
+        ((last > ind["e50"]) if long else (last < ind["e50"]), "Posisi terhadap EMA 50 mendukung", "Melawan EMA 50"),
+        ((ind["rsi"] > 50) if long else (ind["rsi"] < 50), "RSI mendukung", "RSI belum mendukung"),
+        (z["touches"] >= 3, "Zona kuat", "Zona biasa"),
+        (room_ok(direction, last, plan["risk"], zones), "Ruang gerak lega", "Ruang gerak sempit"),
+        (float(c["volume"]) > vol_avg, "Volume di atas rata-rata", "Volume biasa"),
     ]
-    score = sum(1 for _, ok in checks if ok)
-    if score < MIN_SCORE:
-        return summary, None
+    title = "Pantulan dari support" if long else "Penolakan di resisten"
+    return build_alert("pantulan", direction, int(c["ts"]), title, pola, z, plan, checks)
 
-    close_time = datetime.fromtimestamp((ts + H4_MS) / 1000, WIB).strftime("%d %b %H:%M")
-    role = "support" if direction == "long" else "resistance"
-    lines = [
-        f"SETUP {direction.upper()} - {name} (H4)",
-        f"Candle close: {close_time} WIB",
-        f"Pola: {pola} di zona {role} {fmt(z['low'])} - {fmt(z['high'])}",
-        f"Sumber zona: {z['src']} ({z['touches']} sentuhan)",
-        f"Skor: {score}/6",
-        "",
-    ]
-    for text, ok in checks:
-        lines.append(("OK  " if ok else "NO  ") + text)
-    lines += [
-        "",
-        "Rencana contoh (bukan perintah):",
-        f"Entry: {fmt(entry)} (pakai order Limit di sekitar level ini)",
-        f"SL: {fmt(sl)} (jarak {fmt(risk)} = {risk / entry * 100:.2f}%)",
-        f"TP1: {fmt(tp1)} (1,5R)",
-        f"TP2: {fmt(tp2)} (3R)",
-        f"RSI: {rsi_v:.0f} | EMA50: {fmt(e50)} | EMA200: {fmt(e200)}",
-        "{LIVE}",
-        "",
-        "{PLAN}",
-        "",
-        "Cek chart sendiri dulu. Alat bantu belajar, bukan sinyal.",
-    ]
-    return summary, {
-        "direction": direction,
-        "ts": ts,
-        "text": "\n".join(lines),
-        "entry": entry,
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "score": score,
+
+def find_retest(h4, zones, ind):
+    n = len(h4)
+    c, prev = h4.iloc[-1], h4.iloc[-2]
+    last, atr_v = ind["last"], ind["atr"]
+    pin, eng = pin_bar(c), engulfing(prev, c)
+    closes = h4["close"]
+    best = None
+    for z in zones:
+        for direction in ("short", "long"):
+            short = direction == "short"
+            b = None
+            for i in range(max(1, n - 1 - RETEST_MAX_AGE), n - 1):
+                ci, cp = closes.iloc[i], closes.iloc[i - 1]
+                if short and ci < z["low"] and cp >= z["low"]:
+                    b = i
+                    break
+                if (not short) and ci > z["high"] and cp <= z["high"]:
+                    b = i
+                    break
+            if b is None:
+                continue
+            after = closes.iloc[b + 1 : n - 1]
+            if short and (after > z["high"]).any():
+                continue
+            if (not short) and (after < z["low"]).any():
+                continue
+            if short:
+                touched = c["high"] >= z["low"] and c["close"] < z["low"]
+                rejected = c["close"] < c["open"] or pin == "bear" or eng == "bear"
+                pat = "Pin bar" if pin == "bear" else "Engulfing" if eng == "bear" else "Candle penolakan"
+            else:
+                touched = c["low"] <= z["high"] and c["close"] > z["high"]
+                rejected = c["close"] > c["open"] or pin == "bull" or eng == "bull"
+                pat = "Pin bar" if pin == "bull" else "Engulfing" if eng == "bull" else "Candle penolakan"
+            if not (touched and rejected):
+                continue
+            extreme = max(float(c["high"]), z["high"]) if short else min(float(c["low"]), z["low"])
+            plan = make_plan(direction, last, extreme, atr_v)
+            if not plan:
+                continue
+            bc = h4.iloc[b]
+            strong = abs(float(bc["close"]) - float(bc["open"])) >= 0.7 * atr_v
+            vol_ref = h4["volume"].iloc[max(0, b - 20) : b].mean()
+            vol_ok = bool(vol_ref == vol_ref) and float(bc["volume"]) > float(vol_ref)
+            checks = [
+                ((last < ind["e200"]) if short else (last > ind["e200"]), "Searah tren besar", "Melawan tren besar"),
+                (strong, "Breakout kuat", "Breakout lemah"),
+                (vol_ok, "Volume breakout naik", "Volume breakout biasa"),
+                (z["touches"] >= 3, "Zona kuat", "Zona biasa"),
+                ((ind["rsi"] < 50) if short else (ind["rsi"] > 50), "RSI mendukung", "RSI belum mendukung"),
+                (room_ok(direction, last, plan["risk"], zones), "Ruang gerak lega", "Ruang gerak sempit"),
+            ]
+            hours = (n - 1 - b) * 4
+            title = "Retest setelah breakdown" if short else "Retest setelah breakout"
+            alert = build_alert(
+                "retest", direction, int(c["ts"]), title,
+                f"{pat}, breakout {hours} jam lalu", z, plan, checks,
+            )
+            if alert and (best is None or (alert["score"], z["touches"]) > (best["score"], best["zone"]["touches"])):
+                best = alert
+    return best
+
+
+def evaluate(name, h4, zones):
+    close = h4["close"]
+    ind = {
+        "last": float(close.iloc[-1]),
+        "e50": float(ema(close, 50).iloc[-1]),
+        "e200": float(ema(close, 200).iloc[-1]),
+        "rsi": float(rsi(close).iloc[-1]),
+        "atr": float(atr(h4).iloc[-1]),
     }
+    summary = {"rsi": ind["rsi"], "below200": ind["last"] < ind["e200"]}
+    if pd.isna(ind["atr"]) or len(h4) < 60:
+        return summary, None
+    alert = find_retest(h4, zones, ind) or find_bounce(h4, zones, ind)
+    return summary, alert
 
 
 def get_kurs(st):
@@ -400,60 +504,89 @@ def load_settings():
     return st
 
 
-def position_guide(name, direction, entry, sl, tp1, tp2, st):
+def sizing_lines(name, direction, entry, sl, tp1, tp2, st):
     modals = st.get("modal_idr") or []
     if not modals:
-        return "PANDUAN ENTRY: isi daftar modal di settings.json."
+        return ["<b>UKURAN POSISI</b>", "Isi daftar modal di settings.json"]
     kurs, kurs_note = get_kurs(st)
     risk_pct = float(st.get("risk_pct", DEFAULT_RISK))
     dist = abs(entry - sl)
     dist_pct = dist / entry * 100
     gold = name.startswith("EMAS")
     base = "PAXG" if gold else name.split()[0]
-    lines = [
-        f"PANDUAN ENTRY (risiko {risk_pct:g}% per transaksi)",
-        f"Kurs USDT: {kurs:,.0f} ({kurs_note}) | Jarak SL: {dist_pct:.2f}%",
-    ]
+    out = [f"<b>UKURAN POSISI</b> \u00b7 risiko {num(risk_pct, 1).rstrip('0').rstrip(',')}% \u00b7 kurs {fmt(kurs)}"]
+    if kurs_note.startswith("asumsi"):
+        out.append("\u2139\ufe0f kurs masih asumsi, isi kurs_manual di settings.json")
     for modal in modals:
         modal_usd = modal / kurs
         risk_usd = modal_usd * risk_pct / 100
         qty = risk_usd / dist
         notional = qty * entry
         lev = max(1, math.ceil(notional / (MARGIN_TARGET * modal_usd)))
-        lines += ["", f"Modal {rupiah(modal)} (risiko {rupiah(modal * risk_pct / 100)})"]
         if lev > MAX_LEV:
-            lines.append(f"  Terlalu besar untuk modal ini (butuh leverage {lev}x). Lewati.")
+            out.append(f"<b>{rp_short(modal)}</b> \u00b7 terlalu besar untuk modal ini, lewati")
             continue
         margin = notional / lev
         liq_pct = max(100 / lev - 0.5, 0)
-        safe = liq_pct >= 2 * dist_pct
         fee = notional * FEE_ROUNDTRIP
         loss = risk_usd + fee
-        gain1 = qty * abs(tp1 - entry) - fee
         gain2 = qty * abs(tp2 - entry) - fee
-        lines.append(f"  Qty {fmt_qty(qty)} {base} | posisi {rupiah(notional * kurs)}")
-        lines.append(
-            f"  Leverage {lev}x | margin {rupiah(margin * kurs)} | likuidasi sekitar {liq_pct:.0f}%"
-            + ("" if safe else " (DEKAT SL!)")
+        out.append(
+            f"<b>{rp_short(modal)}</b> \u00b7 {fmt_qty(qty)} {base} \u00b7 {lev}x \u00b7 margin {rp_short(margin * kurs)}"
         )
-        lines.append(
-            f"  SL -{rupiah(loss * kurs)} | TP1 +{rupiah(gain1 * kurs)} | TP2 +{rupiah(gain2 * kurs)}"
-        )
+        out.append(f"   rugi SL -{rp_short(loss * kurs)} \u00b7 untung TP2 +{rp_short(gain2 * kurs)}")
+        if liq_pct < 2 * dist_pct:
+            out.append("   \u26a0\ufe0f likuidasi dekat SL, kecilkan posisi")
         if gold:
             lot = qty / 100
-            lines.append(
-                f"  Setara {lot:.4f} lot XAUUSD"
-                + (" (di bawah 0,01 lot, pakai PAXG)" if lot < 0.01 else "")
-            )
+            if lot < 0.01:
+                out.append("   di bawah 0,01 lot XAUUSD, pakai PAXG di exchange")
+            else:
+                out.append(f"   \u2248 {num(lot, 2)} lot XAUUSD")
         if notional < 10:
-            lines.append("  Catatan: posisi di bawah sekitar 10 USDT, mungkin di bawah minimum order.")
-    lines += [
+            out.append("   \u26a0\ufe0f posisi sangat kecil, cek minimum order exchange")
+    return out
+
+
+QUALITY = {6: "Sangat kuat", 5: "Kuat", 4: "Cukup"}
+
+
+def alert_message(name, a, live, src, ts_close, st):
+    long = a["direction"] == "long"
+    z = a["zone"]
+    risk_pct = abs(a["entry"] - a["sl"]) / a["entry"] * 100
+    head = ("\U0001f7e2 <b>BELI (LONG)" if long else "\U0001f534 <b>JUAL (SHORT)") + f" \u00b7 {esc(name)}</b>"
+    lines = [
+        head,
+        f"<i>{esc(a['title'])} \u00b7 H4</i>",
         "",
-        "Sudah termasuk estimasi fee. Likuidasi hanya perkiraan kasar.",
-        "Checklist: order Limit, SL dan TP terpasang, margin Isolated, cek berita besar.",
+        f"Skor {bar(a['score'], 6)} <b>{a['score']}/6</b> \u00b7 {QUALITY.get(a['score'], '')}",
+        "",
+        "<b>RENCANA</b>",
+        "<pre>"
+        f"Entry  {fmt(a['entry'])}\n"
+        f"SL     {fmt(a['sl'])}  (risiko {pct(risk_pct)})\n"
+        f"TP1    {fmt(a['tp1'])}  (1,5R)\n"
+        f"TP2    {fmt(a['tp2'])}  (3R)"
+        "</pre>",
+        f"\U0001f4cd {esc(a['pola'])} \u00b7 zona {zone_range(z)} ({z['touches']}x, {esc(z['src'])})",
+        "",
+        "<b>ALASAN</b>",
     ]
-    if direction == "short":
-        lines.append("SHORT hanya bisa di futures atau margin, bukan spot.")
+    for ok, t_ok, t_no in a["checks"]:
+        lines.append(("\u2705 " + t_ok) if ok else ("\u274c " + t_no))
+    lines.append("")
+    lines += sizing_lines(name, a["direction"], a["entry"], a["sl"], a["tp1"], a["tp2"], st)
+    drift = (live - a["entry"]) / a["entry"] * 100
+    lines.append("")
+    if abs(drift) > 0.5:
+        lines.append(f"\u26a0\ufe0f Harga live {fmt(live)} ({pct(drift, 1, True)} dari entry). Sesuaikan level, jangan kejar harga.")
+    else:
+        lines.append(f"Harga live {fmt(live)}")
+    lines.append(f"\U0001f550 Close {id_date(ts_close)} WIB \u00b7 {esc(src.upper())}")
+    if not long:
+        lines.append("\u2139\ufe0f SHORT hanya bisa di futures atau margin.")
+    lines += ["", "<i>Alat bantu belajar, bukan saran keuangan. Cek chart sendiri dulu.</i>"]
     return "\n".join(lines)
 
 
@@ -597,11 +730,15 @@ def resolve_trade(t, df):
     return "open", None, None, tp1_hit
 
 
-STATUS_TEXT = {
-    "sl": "kena SL",
-    "tp1_sl": "TP1 tercapai lalu kena SL",
-    "tp2": "TP1 dan TP2 tercapai",
-    "expired": "kedaluwarsa (5 hari tanpa hasil)",
+def rfmt(r):
+    return _idn(f"{r:+.2f}") + "R"
+
+
+RESULT_HEAD = {
+    "sl": ("\u274c", "Kena SL"),
+    "tp1_sl": ("\U0001f7e1", "TP1 tercapai, lalu kena SL"),
+    "tp2": ("\u2705", "TP1 dan TP2 tercapai"),
+    "expired": ("\u23f3", "Kedaluwarsa (5 hari tanpa hasil)"),
 }
 
 
@@ -615,18 +752,21 @@ def update_journal(journal, assets):
             continue
         h4 = data["h4"]
         status, r, rts, tp1 = resolve_trade(t, h4[h4["ts"] > t["ts"]])
+        arah = "LONG" if t["direction"] == "long" else "SHORT"
         if status != "open":
             t.update(status=status, r=r, resolved=rts, tp1_hit=tp1)
+            icon, text = RESULT_HEAD[status]
             msgs.append(
-                f"HASIL {t['name']} {t['direction'].upper()}: {STATUS_TEXT[status]} ({r:+.2f}R)\n"
-                f"Entry {fmt(t['entry'])} | SL {fmt(t['sl'])} | TP1 {fmt(t['tp1'])} | TP2 {fmt(t['tp2'])}"
+                f"{icon} <b>HASIL \u00b7 {esc(t['name'])} {arah}</b>\n"
+                f"{text} \u00b7 <b>{rfmt(r)}</b>\n"
+                f"Entry {fmt(t['entry'])} \u2192 SL {fmt(t['sl'])} / TP2 {fmt(t['tp2'])}"
             )
         elif tp1 and not t.get("tp1_notified"):
             t["tp1_hit"] = True
             t["tp1_notified"] = True
             msgs.append(
-                f"UPDATE {t['name']} {t['direction'].upper()}: TP1 tercapai ({fmt(t['tp1'])}). "
-                f"Sisa posisi menuju TP2 {fmt(t['tp2'])}."
+                f"\U0001f3af <b>UPDATE \u00b7 {esc(t['name'])} {arah}</b>\n"
+                f"TP1 tercapai ({fmt(t['tp1'])}). Sisa posisi menuju TP2 {fmt(t['tp2'])}."
             )
     return msgs
 
@@ -655,8 +795,10 @@ def trade_stats(trades):
     }
 
 
-def pf_text(pf):
-    return "belum ada rugi" if pf == float("inf") else f"{pf:.2f}"
+def pf_text(pf, n=1):
+    if n == 0:
+        return "-"
+    return "belum ada rugi" if pf == float("inf") else num(pf, 2)
 
 
 def build_report(journal, state, st, now):
@@ -667,71 +809,70 @@ def build_report(journal, state, st, now):
     week_done = [t for t in journal if t["status"] != "open" and (t.get("resolved") or 0) >= cutoff]
     open_n = sum(1 for t in journal if t["status"] == "open")
     sw, sa = trade_stats(week_done), trade_stats(journal)
+    closed = [t for t in journal if t["status"] != "open" and t.get("r") is not None]
 
     lines = [
-        f"LAPORAN MINGGUAN - minggu ke-{week_no} masa percobaan",
-        f"Dibuat: {now.strftime('%d %b %Y %H:%M')} WIB",
+        f"\U0001f4ca <b>LAPORAN MINGGUAN \u00b7 Minggu {week_no}</b>",
+        f"<i>{id_date(now)} WIB</i>",
         "",
-        "7 HARI TERAKHIR",
-        f"Alert baru: {len(week_alerts)} | selesai: {sw['n']} | masih berjalan: {open_n}",
+        "<b>7 HARI TERAKHIR</b>",
+        f"Alert {len(week_alerts)} \u00b7 selesai {sw['n']} \u00b7 berjalan {open_n}",
     ]
     if sw["n"]:
-        lines.append(
-            f"Menang {sw['wins']} / Kalah {sw['n'] - sw['wins']} | win rate {sw['wr']:.0f}% | total {sw['total']:+.2f}R"
-        )
-    else:
-        lines.append("Belum ada trade yang selesai minggu ini.")
-
-    lines += ["", f"SEJAK AWAL ({sa['n']} trade selesai)"]
-    if sa["n"]:
-        lines += [
-            f"Win rate {sa['wr']:.0f}% | rata-rata {sa['avg']:+.2f}R per trade | total {sa['total']:+.2f}R",
-            f"Profit factor: {pf_text(sa['pf'])} | max drawdown: {sa['dd']:.2f}R",
-        ]
-        modals = st.get("modal_idr") or []
-        if modals:
-            risk_idr = modals[0] * float(st.get("risk_pct", DEFAULT_RISK)) / 100
-            eq = sa["total"] * risk_idr
-            lines.append(
-                f"Perkiraan setara modal {rupiah(modals[0])} (risiko {float(st.get('risk_pct', DEFAULT_RISK)):g}%): "
-                f"{'+' if eq >= 0 else '-'}{rupiah(abs(eq))}, sebelum slippage"
-            )
-        closed = [t for t in journal if t["status"] != "open" and t.get("r") is not None]
-        lines += ["", "PER ASET"]
-        for nm in sorted({t["name"] for t in closed}):
-            ss = trade_stats([t for t in closed if t["name"] == nm])
-            lines.append(f"  {nm}: {ss['n']} trade, win {ss['wr']:.0f}%, {ss['total']:+.2f}R")
-        lines += ["", "PER SKOR"]
-        for label, cond in (("skor 5-6", lambda t: t["score"] >= 5), ("skor 4", lambda t: t["score"] == 4)):
-            sub = [t for t in closed if cond(t)]
-            if sub:
-                ss = trade_stats(sub)
-                lines.append(f"  {label}: {ss['n']} trade, win {ss['wr']:.0f}%, {ss['total']:+.2f}R")
-        lines += ["", "PER ARAH"]
-        for d in ("long", "short"):
-            sub = [t for t in closed if t["direction"] == d]
-            if sub:
-                ss = trade_stats(sub)
-                lines.append(f"  {d.upper()}: {ss['n']} trade, win {ss['wr']:.0f}%, {ss['total']:+.2f}R")
+        lines.append(f"Menang {sw['wins']} \u00b7 Kalah {sw['n'] - sw['wins']} \u00b7 <b>{rfmt(sw['total'])}</b>")
     else:
         lines.append("Belum ada trade yang selesai.")
 
+    lines += ["", f"<b>SEJAK AWAL</b> ({sa['n']} trade selesai)"]
+    if sa["n"]:
+        lines.append(f"Win rate {sa['wr']:.0f}% \u00b7 Total <b>{rfmt(sa['total'])}</b> \u00b7 rata-rata {rfmt(sa['avg'])}")
+        lines.append(f"Profit factor {pf_text(sa['pf'], sa['n'])} \u00b7 Drawdown maks {num(sa['dd'], 1)}R")
+        modals = st.get("modal_idr") or []
+        if modals:
+            rp = float(st.get("risk_pct", DEFAULT_RISK))
+            eq = sa["total"] * modals[0] * rp / 100
+            lines.append(
+                f"\u2248 {'+' if eq >= 0 else '-'}{rp_short(abs(eq))} "
+                f"(modal {rp_short(modals[0])}, risiko {num(rp, 1).rstrip('0').rstrip(',')}%)"
+            )
+
+        def row(label, sub):
+            ss = trade_stats(sub)
+            return f"{label}  {ss['n']} trade \u00b7 menang {ss['wr']:.0f}% \u00b7 {rfmt(ss['total'])}"
+
+        lines += ["", "<b>PER ASET</b>"]
+        for nm in sorted({t["name"] for t in closed}):
+            lines.append(row(esc(nm), [t for t in closed if t["name"] == nm]))
+        lines += ["", "<b>PER SETUP</b>"]
+        for kind, label in (("pantulan", "Pantulan"), ("retest", "Retest")):
+            sub = [t for t in closed if t.get("kind", "pantulan") == kind]
+            if sub:
+                lines.append(row(label, sub))
+        lines += ["", "<b>PER SKOR</b>"]
+        for label, cond in (("Skor 5-6", lambda t: t["score"] >= 5), ("Skor 4", lambda t: t["score"] == 4)):
+            sub = [t for t in closed if cond(t)]
+            if sub:
+                lines.append(row(label, sub))
+    else:
+        lines.append("Belum ada trade yang selesai.")
+
+    ok_n = "\u2705" if sa["n"] >= 30 else "\u274c"
+    ok_pf = "\u2705" if sa["pf"] > 1.3 else "\u274c"
     lines += [
         "",
-        "KRITERIA LULUS (sebelum akun real)",
-        f"  Trade selesai 30+: {sa['n']}/30 {'OK' if sa['n'] >= 30 else 'belum'}",
-        f"  Profit factor di atas 1,3: {pf_text(sa['pf'])} {'OK' if sa['pf'] > 1.3 else 'belum'}",
-        f"  Drawdown wajar dan Anda disiplin: {sa['dd']:.2f}R (nilai sendiri)",
+        "\U0001f393 <b>TARGET LULUS</b>",
+        f"Trade selesai {bar(min(sa['n'], 30) / 30 * 10, 10)} {sa['n']}/30 {ok_n}",
+        f"Profit factor di atas 1,3: {pf_text(sa['pf'], sa['n'])} {ok_pf}",
     ]
     if week_no in (4, 8, 12):
-        lines.append(f"  >> Minggu ke-{week_no} adalah titik evaluasi: ubah aturan hanya di sini, dan hanya jika sampel cukup.")
+        lines.append(f"\U0001f4cc Minggu {week_no} = titik evaluasi. Ubah aturan hanya sekarang, dan hanya jika sampel cukup.")
     if sa["n"] < 30:
-        lines.append("  Sampel masih di bawah 30, jangan menyimpulkan apa pun dari angka di atas.")
+        lines.append("\u26a0\ufe0f Sampel masih kecil, jangan simpulkan apa pun dari angka ini.")
     lines += [
         "",
-        "Model hasil: entry di close candle sinyal, 50% keluar di TP1 dan 50% di TP2, SL tidak digeser. "
-        "Jika SL dan TP kena di candle yang sama, dihitung SL dulu. "
-        "Hasil nyata bisa berbeda (fee, slippage, limit tidak terisi). Ini alat bantu belajar.",
+        "<i>Model hasil: entry di close candle sinyal, 50% keluar di TP1 dan 50% di TP2, "
+        "SL tidak digeser, SL dihitung dulu jika SL dan TP kena satu candle. "
+        "Hasil nyata bisa berbeda (fee, slippage). Alat bantu belajar.</i>",
     ]
     return "\n".join(lines)
 
@@ -756,11 +897,15 @@ def tg_url(method):
 
 
 def send_telegram(text):
+    chat = os.environ["TELEGRAM_CHAT_ID"]
     resp = requests.post(
         tg_url("sendMessage"),
-        data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text[:4000]},
+        data={"chat_id": chat, "text": text[:4000], "parse_mode": "HTML", "disable_web_page_preview": True},
         timeout=30,
     )
+    if resp.status_code == 400:
+        plain = html.unescape(re.sub(r"<[^>]+>", "", text))[:4000]
+        resp = requests.post(tg_url("sendMessage"), data={"chat_id": chat, "text": plain}, timeout=30)
     resp.raise_for_status()
 
 
@@ -792,17 +937,19 @@ def main():
     req = ALIASES.get(os.environ.get("CHART_REQUEST", "").strip().lower())
     chart_reqs = [req] if req else []
 
-    summaries = []
+    blocks = []
     assets = {}
     sent = 0
+    used = set()
     for name, symbol in SYMBOLS.items():
         try:
             if MARKET == "swap" and ":" not in symbol:
                 symbol = symbol + ":USDT"
             ex = get_exchange_for(symbol)
             if ex is None:
-                summaries.append(f"{name}: pair {symbol} tidak ada di exchange yang bisa diakses")
+                blocks += [f"\u26a0\ufe0f <b>{esc(name)}</b> \u00b7 data tidak tersedia", ""]
                 continue
+            used.add(ex.id.upper())
             live = float(ex.fetch_ticker(symbol)["last"])
             daily = fetch_closed(ex, symbol, "1d")
             h4 = fetch_closed(ex, symbol, "4h")
@@ -816,31 +963,25 @@ def main():
             detect_zones = [z for z in zones if not z.get("weak")]
             assets[name] = {"h4": h4, "zones": zones, "live": live, "ex": ex.id}
             summary, alert = evaluate(name, h4, detect_zones)
-            summaries.append(summary + f" | live {fmt(live)} [{ex.id}]")
-            summaries.extend(nearest_zones(zones, live))
+            icon = "\U0001f4c9" if summary["below200"] else "\U0001f4c8"
+            blocks.append(f"{icon} <b>{esc(name)}</b>  {fmt(live)} \u00b7 RSI {summary['rsi']:.0f}")
+            blocks += nearest_zones(zones, live)
+            blocks.append("")
             if alert:
-                key = f"{name}:{alert['direction']}"
+                key = f"{name}:{alert['direction']}:{alert['kind']}"
                 last_ts = state["alerts"].get(key, 0)
                 if alert["ts"] - last_ts >= COOLDOWN_CANDLES * H4_MS:
-                    plan_text = position_guide(
-                        name, alert["direction"], alert["entry"], alert["sl"],
-                        alert["tp1"], alert["tp2"], st,
-                    )
-                    live_line = f"Harga live: {fmt(live)} | sumber: {ex.id} ({MARKET})"
-                    drift = (live - alert["entry"]) / alert["entry"] * 100
-                    if abs(drift) > 0.5:
-                        live_line += (
-                            f"\nPERHATIAN: harga live sudah {drift:+.2f}% dari entry contoh. "
-                            "Sesuaikan level, jangan kejar harga."
-                        )
-                    text = alert["text"].replace("{LIVE}", live_line).replace("{PLAN}", plan_text)
+                    close_dt = datetime.fromtimestamp((alert["ts"] + H4_MS) / 1000, WIB)
+                    text = alert_message(name, alert, live, ex.id, close_dt, st)
                     try:
                         path = os.path.join(tempfile.gettempdir(), f"chart_{name.split()[0]}.png")
+                        arah = "BELI" if alert["direction"] == "long" else "JUAL"
                         make_chart(
-                            path, f"{name} H4 | {alert['direction'].upper()} | skor {alert['score']}/6 | {ex.id}",
+                            path,
+                            f"{name} \u00b7 {arah} \u00b7 {alert['title']} \u00b7 skor {alert['score']}/6 \u00b7 {ex.id}",
                             h4, zones, plan=alert,
                         )
-                        send_photo(path, f"{name} H4 - {alert['direction'].upper()}")
+                        send_photo(path, f"{name} H4 \u00b7 {arah}")
                     except Exception as e:
                         print(f"chart gagal: {e}")
                     send_telegram(text)
@@ -851,6 +992,7 @@ def main():
                             "id": f"{key}:{alert['ts']}",
                             "name": name,
                             "direction": alert["direction"],
+                            "kind": alert["kind"],
                             "ts": alert["ts"],
                             "entry": alert["entry"],
                             "sl": alert["sl"],
@@ -867,7 +1009,7 @@ def main():
                         }
                     )
         except Exception as e:
-            summaries.append(f"{name}: gagal ({e})")
+            blocks += [f"\u26a0\ufe0f <b>{esc(name)}</b> \u00b7 gagal ambil data", ""]
             print(f"{name} error: {e}")
 
     for m in update_journal(journal, assets):
@@ -880,8 +1022,8 @@ def main():
             continue
         try:
             path = os.path.join(tempfile.gettempdir(), f"chart_{req.split()[0]}.png")
-            make_chart(path, f"{req} H4 | {data['ex']}", data["h4"], data["zones"])
-            send_photo(path, f"{req} H4 | live {fmt(data['live'])} | zona dari bot")
+            make_chart(path, f"{req} H4 \u00b7 {data['ex']}", data["h4"], data["zones"])
+            send_photo(path, f"{req} H4 \u00b7 live {fmt(data['live'])}")
         except Exception as e:
             safe_reply(f"Gagal membuat chart {req}: {e}")
 
@@ -899,15 +1041,13 @@ def main():
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if state.get("heartbeat") != today or os.environ.get("SEND_SUMMARY") == "1":
-        msg = [
-            "BOT AKTIF - ringkasan H4",
-            f"Sumber utama: {PRIMARY} ({MARKET}). Tanda [ ] = exchange yang dipakai per aset",
-            "close H4 = harga penutupan candle terakhir, bukan harga live",
-            f"Setup terkirim run ini: {sent}",
-            "Modal dan risiko diatur di settings.json",
+        head = [
+            f"\U0001f7e2 <b>BOT AKTIF</b> \u00b7 {id_date(now_wib)} WIB",
+            f"Data: {esc(', '.join(sorted(used)) or '-')} \u00b7 setup baru: {sent}",
             "",
-        ] + summaries
-        send_telegram("\n".join(msg))
+        ]
+        foot = ["\U0001f4c9 / \U0001f4c8 = harga di bawah / atas EMA 200 (H4)", "\u2b06 resisten \u00b7 \u2b07 support terdekat"]
+        send_telegram("\n".join(head + blocks + foot))
         state["heartbeat"] = today
     save_state(state)
     save_journal(journal)
