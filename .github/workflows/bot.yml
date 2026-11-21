@@ -9,6 +9,9 @@ on:
       chart:
         description: "Kirim gambar chart (BTC, ETH, SOL, BNB, EMAS), kosongkan jika tidak perlu"
         default: ""
+      report:
+        description: "Kirim laporan mingguan sekarang (1 = ya)"
+        default: "0"
   schedule:
     - cron: "*/30 * * * *"
 
@@ -36,9 +39,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SEND_SUMMARY: ${{ inputs.summary }}
           CHART_REQUEST: ${{ inputs.chart }}
+          REPORT_NOW: ${{ inputs.report }}
       - name: Simpan state
         run: |
           git config user.name "bot"
           git config user.email "bot@users.noreply.github.com"
-          git add state.json
+          git add state.json journal.json
           git diff --staged --quiet || (git commit -m "update state" && git push)
