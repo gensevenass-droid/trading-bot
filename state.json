@@ -1,4 +1,6 @@
 {
   "alerts": {},
-  "heartbeat": "2026-11-21"
+  "heartbeat": "2026-11-21",
+  "settings": {},
+  "update_offset": 81531711
 }
