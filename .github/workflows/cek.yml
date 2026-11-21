@@ -11,46 +11,67 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install ccxt requests
-      - name: Cek harga BTC
+      - name: Cek harga BTC di banyak exchange
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'PY'
           import os
+          import statistics
           from datetime import datetime, timezone
           import ccxt
           import requests
 
-          lines = ["CEK HARGA BTC (live, dari server bot)", ""]
-          targets = [
-              ("bybit", "BTC/USDT", "spot"),
-              ("bybit", "BTC/USDT:USDT", "perp"),
-              ("kucoin", "BTC/USDT", "spot"),
-              ("okx", "BTC/USDT", "spot"),
+          EXCHANGES = [
+              "bybit", "binance", "bitget", "gate", "mexc", "htx", "okx", "kucoin",
+              "kraken", "coinbase", "bitstamp", "bitfinex", "cryptocom", "bingx",
+              "bitmart", "lbank",
           ]
-          for name, sym, kind in targets:
+          rows, fails = [], []
+          for name in EXCHANGES:
               try:
-                  opts = {"enableRateLimit": True}
-                  if kind == "perp":
-                      opts["options"] = {"defaultType": "swap"}
-                  ex = getattr(ccxt, name)(opts)
-                  t = ex.fetch_ticker(sym)
+                  ex = getattr(ccxt, name)({"enableRateLimit": True, "timeout": 15000})
+                  t = ex.fetch_ticker("BTC/USDT")
                   ts = t.get("timestamp")
                   waktu = (
                       datetime.fromtimestamp(ts / 1000, timezone.utc).strftime("%H:%M:%S")
                       if ts
                       else "?"
                   )
-                  lines.append(f"{name} {kind}: {t['last']:,.2f} (data {waktu} UTC)")
+                  try:
+                      g = ex.fetch_ticker("PAXG/USDT")
+                      gold = f"{float(g['last']):,.2f}"
+                  except Exception:
+                      gold = "tidak ada"
+                  rows.append((name, float(t["last"]), waktu, gold))
               except Exception as e:
-                  lines.append(f"{name} {kind}: GAGAL ({str(e)[:90]})")
+                  msg = str(e).replace("\n", " ")
+                  if "403" in msg:
+                      alasan = "diblokir (403)"
+                  elif "451" in msg:
+                      alasan = "diblokir (451)"
+                  else:
+                      alasan = msg[:40]
+                  fails.append(f"{name}: {alasan}")
+
+          lines = ["CEK HARGA BTC/USDT (live, dari server bot)", ""]
+          if rows:
+              med = statistics.median(r[1] for r in rows)
+              lines.append(f"Median pasar: {med:,.2f} dari {len(rows)} exchange")
+              lines.append("(selisih terhadap median, PAXG = proxy emas)")
+              lines.append("")
+              for name, price, waktu, gold in sorted(rows, key=lambda r: abs(r[1] - med)):
+                  dev = (price - med) / med * 100
+                  lines.append(f"{name}: {price:,.2f} ({dev:+.3f}%) {waktu}Z | PAXG {gold}")
+          if fails:
+              lines += ["", "Tidak bisa dipakai:"] + fails
           now = datetime.now(timezone.utc).strftime("%H:%M:%S")
           lines += ["", f"Waktu cek: {now} UTC", "Bandingkan dengan TradingView sekarang."]
           url = "https://api.telegram.org/bot" + os.environ["TELEGRAM_TOKEN"] + "/sendMessage"
           requests.post(
               url,
-              data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": "\n".join(lines)},
+              data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": "\n".join(lines)[:4000]},
               timeout=30,
           ).raise_for_status()
           PY
