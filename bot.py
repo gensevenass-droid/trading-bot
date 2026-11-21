@@ -48,6 +48,8 @@ MARGIN_TARGET = 0.4
 MAX_LEV = 3
 FEE_ROUNDTRIP = 0.001
 STATE_FILE = "state.json"
+JOURNAL_FILE = "journal.json"
+EXPIRE_CANDLES = 30
 ZONES_FILE = "zones.json"
 WIB = timezone(timedelta(hours=7))
 H4_MS = 4 * 60 * 60 * 1000
@@ -546,6 +548,194 @@ def make_chart(path, title, h4, zones, plan=None, n=100):
     plt.close(fig)
 
 
+def load_journal():
+    if os.path.exists(JOURNAL_FILE):
+        try:
+            with open(JOURNAL_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def save_journal(journal):
+    with open(JOURNAL_FILE, "w") as f:
+        json.dump(journal, f, indent=1)
+
+
+def resolve_trade(t, df):
+    """Model hasil: entry di close candle sinyal, 50% ditutup di TP1 dan 50% di TP2,
+    SL tidak digeser. Jika SL dan TP kena di candle yang sama, SL dihitung lebih dulu."""
+    long = t["direction"] == "long"
+    risk = abs(t["entry"] - t["sl"])
+    tp1_hit = False
+    n = 0
+    last_close = t["entry"]
+    for _, c in df.iterrows():
+        n += 1
+        hi, lo, ts = float(c["high"]), float(c["low"]), int(c["ts"])
+        last_close = float(c["close"])
+        sl_hit = lo <= t["sl"] if long else hi >= t["sl"]
+        tp1_c = hi >= t["tp1"] if long else lo <= t["tp1"]
+        tp2_c = hi >= t["tp2"] if long else lo <= t["tp2"]
+        if not tp1_hit:
+            if sl_hit:
+                return "sl", -1.0, ts, False
+            if tp1_c:
+                tp1_hit = True
+                if tp2_c:
+                    return "tp2", 2.25, ts, True
+        else:
+            if sl_hit:
+                return "tp1_sl", 0.25, ts, True
+            if tp2_c:
+                return "tp2", 2.25, ts, True
+        if n >= EXPIRE_CANDLES:
+            mtm = ((last_close - t["entry"]) if long else (t["entry"] - last_close)) / risk
+            r = (0.75 + 0.5 * mtm) if tp1_hit else mtm
+            return "expired", round(r, 2), ts, tp1_hit
+    return "open", None, None, tp1_hit
+
+
+STATUS_TEXT = {
+    "sl": "kena SL",
+    "tp1_sl": "TP1 tercapai lalu kena SL",
+    "tp2": "TP1 dan TP2 tercapai",
+    "expired": "kedaluwarsa (5 hari tanpa hasil)",
+}
+
+
+def update_journal(journal, assets):
+    msgs = []
+    for t in journal:
+        if t["status"] != "open":
+            continue
+        data = assets.get(t["name"])
+        if not data:
+            continue
+        h4 = data["h4"]
+        status, r, rts, tp1 = resolve_trade(t, h4[h4["ts"] > t["ts"]])
+        if status != "open":
+            t.update(status=status, r=r, resolved=rts, tp1_hit=tp1)
+            msgs.append(
+                f"HASIL {t['name']} {t['direction'].upper()}: {STATUS_TEXT[status]} ({r:+.2f}R)\n"
+                f"Entry {fmt(t['entry'])} | SL {fmt(t['sl'])} | TP1 {fmt(t['tp1'])} | TP2 {fmt(t['tp2'])}"
+            )
+        elif tp1 and not t.get("tp1_notified"):
+            t["tp1_hit"] = True
+            t["tp1_notified"] = True
+            msgs.append(
+                f"UPDATE {t['name']} {t['direction'].upper()}: TP1 tercapai ({fmt(t['tp1'])}). "
+                f"Sisa posisi menuju TP2 {fmt(t['tp2'])}."
+            )
+    return msgs
+
+
+def trade_stats(trades):
+    closed = [t for t in trades if t["status"] != "open" and t.get("r") is not None]
+    rs = [t["r"] for t in closed]
+    n = len(rs)
+    wins = [r for r in rs if r > 0]
+    gp = sum(wins)
+    gl = abs(sum(r for r in rs if r < 0))
+    pf = (gp / gl) if gl > 0 else (float("inf") if gp > 0 else 0.0)
+    cum = peak = dd = 0.0
+    for t in sorted(closed, key=lambda x: x.get("resolved") or 0):
+        cum += t["r"]
+        peak = max(peak, cum)
+        dd = max(dd, peak - cum)
+    return {
+        "n": n,
+        "wins": len(wins),
+        "wr": (len(wins) / n * 100) if n else 0.0,
+        "total": sum(rs),
+        "avg": (sum(rs) / n) if n else 0.0,
+        "pf": pf,
+        "dd": dd,
+    }
+
+
+def pf_text(pf):
+    return "belum ada rugi" if pf == float("inf") else f"{pf:.2f}"
+
+
+def build_report(journal, state, st, now):
+    start = datetime.strptime(state.get("start_date", now.strftime("%Y-%m-%d")), "%Y-%m-%d")
+    week_no = (now.replace(tzinfo=None) - start).days // 7 + 1
+    cutoff = (now - timedelta(days=7)).timestamp() * 1000
+    week_alerts = [t for t in journal if datetime.fromisoformat(t["created"]).timestamp() * 1000 >= cutoff]
+    week_done = [t for t in journal if t["status"] != "open" and (t.get("resolved") or 0) >= cutoff]
+    open_n = sum(1 for t in journal if t["status"] == "open")
+    sw, sa = trade_stats(week_done), trade_stats(journal)
+
+    lines = [
+        f"LAPORAN MINGGUAN - minggu ke-{week_no} masa percobaan",
+        f"Dibuat: {now.strftime('%d %b %Y %H:%M')} WIB",
+        "",
+        "7 HARI TERAKHIR",
+        f"Alert baru: {len(week_alerts)} | selesai: {sw['n']} | masih berjalan: {open_n}",
+    ]
+    if sw["n"]:
+        lines.append(
+            f"Menang {sw['wins']} / Kalah {sw['n'] - sw['wins']} | win rate {sw['wr']:.0f}% | total {sw['total']:+.2f}R"
+        )
+    else:
+        lines.append("Belum ada trade yang selesai minggu ini.")
+
+    lines += ["", f"SEJAK AWAL ({sa['n']} trade selesai)"]
+    if sa["n"]:
+        lines += [
+            f"Win rate {sa['wr']:.0f}% | rata-rata {sa['avg']:+.2f}R per trade | total {sa['total']:+.2f}R",
+            f"Profit factor: {pf_text(sa['pf'])} | max drawdown: {sa['dd']:.2f}R",
+        ]
+        modals = st.get("modal_idr") or []
+        if modals:
+            risk_idr = modals[0] * float(st.get("risk_pct", DEFAULT_RISK)) / 100
+            eq = sa["total"] * risk_idr
+            lines.append(
+                f"Perkiraan setara modal {rupiah(modals[0])} (risiko {float(st.get('risk_pct', DEFAULT_RISK)):g}%): "
+                f"{'+' if eq >= 0 else '-'}{rupiah(abs(eq))}, sebelum slippage"
+            )
+        closed = [t for t in journal if t["status"] != "open" and t.get("r") is not None]
+        lines += ["", "PER ASET"]
+        for nm in sorted({t["name"] for t in closed}):
+            ss = trade_stats([t for t in closed if t["name"] == nm])
+            lines.append(f"  {nm}: {ss['n']} trade, win {ss['wr']:.0f}%, {ss['total']:+.2f}R")
+        lines += ["", "PER SKOR"]
+        for label, cond in (("skor 5-6", lambda t: t["score"] >= 5), ("skor 4", lambda t: t["score"] == 4)):
+            sub = [t for t in closed if cond(t)]
+            if sub:
+                ss = trade_stats(sub)
+                lines.append(f"  {label}: {ss['n']} trade, win {ss['wr']:.0f}%, {ss['total']:+.2f}R")
+        lines += ["", "PER ARAH"]
+        for d in ("long", "short"):
+            sub = [t for t in closed if t["direction"] == d]
+            if sub:
+                ss = trade_stats(sub)
+                lines.append(f"  {d.upper()}: {ss['n']} trade, win {ss['wr']:.0f}%, {ss['total']:+.2f}R")
+    else:
+        lines.append("Belum ada trade yang selesai.")
+
+    lines += [
+        "",
+        "KRITERIA LULUS (sebelum akun real)",
+        f"  Trade selesai 30+: {sa['n']}/30 {'OK' if sa['n'] >= 30 else 'belum'}",
+        f"  Profit factor di atas 1,3: {pf_text(sa['pf'])} {'OK' if sa['pf'] > 1.3 else 'belum'}",
+        f"  Drawdown wajar dan Anda disiplin: {sa['dd']:.2f}R (nilai sendiri)",
+    ]
+    if week_no in (4, 8, 12):
+        lines.append(f"  >> Minggu ke-{week_no} adalah titik evaluasi: ubah aturan hanya di sini, dan hanya jika sampel cukup.")
+    if sa["n"] < 30:
+        lines.append("  Sampel masih di bawah 30, jangan menyimpulkan apa pun dari angka di atas.")
+    lines += [
+        "",
+        "Model hasil: entry di close candle sinyal, 50% keluar di TP1 dan 50% di TP2, SL tidak digeser. "
+        "Jika SL dan TP kena di candle yang sama, dihitung SL dulu. "
+        "Hasil nyata bisa berbeda (fee, slippage, limit tidak terisi). Ini alat bantu belajar.",
+    ]
+    return "\n".join(lines)
+
+
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -596,6 +786,9 @@ def main():
     state = load_state()
     state.setdefault("alerts", {})
     st = load_settings()
+    journal = load_journal()
+    now_wib = datetime.now(WIB)
+    state.setdefault("start_date", now_wib.strftime("%Y-%m-%d"))
     req = ALIASES.get(os.environ.get("CHART_REQUEST", "").strip().lower())
     chart_reqs = [req] if req else []
 
@@ -653,9 +846,32 @@ def main():
                     send_telegram(text)
                     state["alerts"][key] = alert["ts"]
                     sent += 1
+                    journal.append(
+                        {
+                            "id": f"{key}:{alert['ts']}",
+                            "name": name,
+                            "direction": alert["direction"],
+                            "ts": alert["ts"],
+                            "entry": alert["entry"],
+                            "sl": alert["sl"],
+                            "tp1": alert["tp1"],
+                            "tp2": alert["tp2"],
+                            "score": alert["score"],
+                            "exchange": ex.id,
+                            "created": datetime.now(timezone.utc).isoformat(),
+                            "status": "open",
+                            "r": None,
+                            "resolved": None,
+                            "tp1_hit": False,
+                            "tp1_notified": False,
+                        }
+                    )
         except Exception as e:
             summaries.append(f"{name}: gagal ({e})")
             print(f"{name} error: {e}")
+
+    for m in update_journal(journal, assets):
+        safe_reply(m)
 
     for req in chart_reqs:
         data = assets.get(req)
@@ -668,6 +884,18 @@ def main():
             send_photo(path, f"{req} H4 | live {fmt(data['live'])} | zona dari bot")
         except Exception as e:
             safe_reply(f"Gagal membuat chart {req}: {e}")
+
+    week_key = now_wib.strftime("%G-W%V")
+    force_report = os.environ.get("REPORT_NOW") == "1"
+    if force_report or (
+        now_wib.weekday() == 6 and now_wib.hour >= 20 and state.get("last_report") != week_key
+    ):
+        try:
+            send_telegram(build_report(journal, state, st, now_wib))
+            if not force_report:
+                state["last_report"] = week_key
+        except Exception as e:
+            print(f"laporan gagal: {e}")
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if state.get("heartbeat") != today or os.environ.get("SEND_SUMMARY") == "1":
@@ -682,6 +910,7 @@ def main():
         send_telegram("\n".join(msg))
         state["heartbeat"] = today
     save_state(state)
+    save_journal(journal)
     print(f"Selesai. Alert terkirim: {sent}")
 
 
