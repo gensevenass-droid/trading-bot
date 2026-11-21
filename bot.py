@@ -14,7 +14,9 @@ SYMBOLS = {
     "BNB": "BNB/USDT",
     "EMAS (PAXG)": "PAXG/USDT",
 }
-EXCHANGES = ["kucoin", "okx", "bybit"]
+PRIMARY = os.environ.get("PRIMARY_EXCHANGE", "bybit").strip() or "bybit"
+EXCHANGES = [PRIMARY] + [e for e in ("bybit", "kucoin", "okx") if e != PRIMARY]
+MARKET = os.environ.get("MARKET", "spot").strip() or "spot"
 MIN_SCORE = 4
 COOLDOWN_CANDLES = 3
 SWING_K = 5
@@ -28,7 +30,10 @@ H4_MS = 4 * 60 * 60 * 1000
 def get_exchange():
     for name in EXCHANGES:
         try:
-            ex = getattr(ccxt, name)({"enableRateLimit": True})
+            opts = {"enableRateLimit": True}
+            if MARKET == "swap":
+                opts["options"] = {"defaultType": "swap"}
+            ex = getattr(ccxt, name)(opts)
             ex.load_markets()
             print(f"Exchange dipakai: {name}")
             return ex
@@ -153,6 +158,23 @@ def fmt(x):
     return f"{x:,.2f}"
 
 
+def nearest_zones(zones, last):
+    below = [z for z in zones if z["high"] < last]
+    above = [z for z in zones if z["low"] > last]
+    inside = [z for z in zones if z["low"] <= last <= z["high"]]
+    parts = []
+    if above:
+        z = min(above, key=lambda zz: zz["low"])
+        parts.append(f"  Resisten terdekat: {fmt(z['low'])} - {fmt(z['high'])} ({z['touches']}x, {z['src']})")
+    if inside:
+        z = inside[0]
+        parts.append(f"  Harga DI DALAM zona: {fmt(z['low'])} - {fmt(z['high'])}")
+    if below:
+        z = max(below, key=lambda zz: zz["high"])
+        parts.append(f"  Support terdekat: {fmt(z['low'])} - {fmt(z['high'])} ({z['touches']}x, {z['src']})")
+    return parts
+
+
 def evaluate(name, h4, zones):
     close = h4["close"]
     last = float(close.iloc[-1])
@@ -166,7 +188,7 @@ def evaluate(name, h4, zones):
     ts = int(c["ts"])
 
     summary = (
-        f"{name}: {fmt(last)} | RSI {rsi_v:.0f} | "
+        f"{name}: close H4 {fmt(last)} | RSI {rsi_v:.0f} | "
         f"{'di bawah' if last < e200 else 'di atas'} EMA200"
     )
 
@@ -253,6 +275,7 @@ def evaluate(name, h4, zones):
         f"TP1: {fmt(tp1)} (1,5R)",
         f"TP2: {fmt(tp2)} (3R)",
         f"RSI: {rsi_v:.0f} | EMA50: {fmt(e50)} | EMA200: {fmt(e200)}",
+        "{LIVE}",
         "",
         "Cek chart sendiri dulu. Alat bantu belajar, bukan sinyal.",
     ]
@@ -290,12 +313,24 @@ def main():
     sent = 0
     for name, symbol in SYMBOLS.items():
         try:
+            if MARKET == "swap" and ":" not in symbol:
+                symbol = symbol + ":USDT"
+            if symbol not in ex.markets:
+                summaries.append(f"{name}: pair {symbol} tidak ada di {ex.id}")
+                continue
+            live = float(ex.fetch_ticker(symbol)["last"])
             daily = fetch_closed(ex, symbol, "1d")
             h4 = fetch_closed(ex, symbol, "4h")
             zones = find_zones(daily) + load_manual_zones(name.split()[0])
             summary, alert = evaluate(name, h4, zones)
-            summaries.append(summary)
+            summaries.append(summary + f" | live {fmt(live)}")
+            summaries.extend(nearest_zones(zones, live))
             if alert:
+                entry_txt = alert["text"]
+                alert["text"] = entry_txt.replace(
+                    "{LIVE}",
+                    f"Harga live: {fmt(live)} | sumber: {ex.id} ({MARKET})",
+                )
                 key = f"{name}:{alert['direction']}"
                 last_ts = state["alerts"].get(key, 0)
                 if alert["ts"] - last_ts >= COOLDOWN_CANDLES * H4_MS:
@@ -308,7 +343,13 @@ def main():
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if state.get("heartbeat") != today or os.environ.get("SEND_SUMMARY") == "1":
-        msg = ["BOT AKTIF - ringkasan H4", f"Setup terkirim run ini: {sent}", ""] + summaries
+        msg = [
+            "BOT AKTIF - ringkasan H4",
+            f"Sumber data: {ex.id} ({MARKET})",
+            "close H4 = harga penutupan candle terakhir, bukan harga live",
+            f"Setup terkirim run ini: {sent}",
+            "",
+        ] + summaries
         send_telegram("\n".join(msg))
         state["heartbeat"] = today
     save_state(state)
