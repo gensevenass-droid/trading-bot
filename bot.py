@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -84,38 +85,55 @@ def atr(df, period=14):
     return tr.rolling(period).mean()
 
 
-def find_zones(daily):
-    a = atr(daily).iloc[-1]
+def find_zones(df, k=SWING_K, width=0.75, min_touches=2):
+    a = atr(df).iloc[-1]
     if pd.isna(a) or a <= 0:
         return []
-    highs = daily["high"].values
-    lows = daily["low"].values
+    highs = df["high"].values
+    lows = df["low"].values
     pts = []
-    for i in range(SWING_K, len(daily) - SWING_K):
-        if highs[i] == highs[i - SWING_K : i + SWING_K + 1].max():
+    for i in range(k, len(df) - k):
+        if highs[i] == highs[i - k : i + k + 1].max():
             pts.append(float(highs[i]))
-        if lows[i] == lows[i - SWING_K : i + SWING_K + 1].min():
+        if lows[i] == lows[i - k : i + k + 1].min():
             pts.append(float(lows[i]))
     pts.sort()
     clusters = []
     for p in pts:
-        if clusters and p - clusters[-1][0] <= 0.75 * a:
+        if clusters and p - clusters[-1][0] <= width * a:
             clusters[-1].append(p)
         else:
             clusters.append([p])
     zones = []
     for c in clusters:
-        if len(c) >= 2:
+        if len(c) >= min_touches:
             zones.append(
                 {
                     "low": min(c) - 0.1 * a,
                     "high": max(c) + 0.1 * a,
                     "touches": len(c),
                     "src": "auto",
+                    "weak": len(c) < 2,
                 }
             )
-    last = float(daily["close"].iloc[-1])
+    last = float(df["close"].iloc[-1])
     return [z for z in zones if abs((z["low"] + z["high"]) / 2 - last) / last <= 0.30]
+
+
+def merge_zones(zones):
+    zones = sorted(zones, key=lambda z: z["low"])
+    out = []
+    for z in zones:
+        if out and z["low"] <= out[-1]["high"]:
+            m = out[-1]
+            m["high"] = max(m["high"], z["high"])
+            m["touches"] = max(m["touches"], z["touches"])
+            m["weak"] = m["weak"] and z["weak"]
+            if z["src"] == "manual":
+                m["src"] = "manual"
+        else:
+            out.append(dict(z))
+    return out
 
 
 def load_manual_zones(key):
@@ -125,7 +143,7 @@ def load_manual_zones(key):
         with open(ZONES_FILE) as f:
             data = json.load(f)
         return [
-            {"low": float(lo), "high": float(hi), "touches": 3, "src": "manual"}
+            {"low": float(lo), "high": float(hi), "touches": 3, "src": "manual", "weak": False}
             for lo, hi in data.get(key, [])
         ]
     except Exception as e:
@@ -169,20 +187,31 @@ def fmt(x):
     return f"{x:,.2f}"
 
 
+def zone_text(z):
+    tag = "lemah 1x" if z.get("weak") else f"{z['touches']}x"
+    return f"{fmt(z['low'])} - {fmt(z['high'])} ({tag}, {z['src']})"
+
+
 def nearest_zones(zones, last):
-    below = [z for z in zones if z["high"] < last]
+    step = 10 ** math.floor(math.log10(last)) / 2
     above = [z for z in zones if z["low"] > last]
+    below = [z for z in zones if z["high"] < last]
     inside = [z for z in zones if z["low"] <= last <= z["high"]]
     parts = []
     if above:
-        z = min(above, key=lambda zz: zz["low"])
-        parts.append(f"  Resisten terdekat: {fmt(z['low'])} - {fmt(z['high'])} ({z['touches']}x, {z['src']})")
+        parts.append("  Resisten: " + zone_text(min(above, key=lambda z: z["low"])))
+    else:
+        lvl = math.floor(last / step) * step + step
+        parts.append(f"  Resisten: tidak ada zona di data, level bulat {fmt(lvl)}")
     if inside:
-        z = inside[0]
-        parts.append(f"  Harga DI DALAM zona: {fmt(z['low'])} - {fmt(z['high'])}")
+        parts.append("  Di dalam zona: " + zone_text(inside[0]))
     if below:
-        z = max(below, key=lambda zz: zz["high"])
-        parts.append(f"  Support terdekat: {fmt(z['low'])} - {fmt(z['high'])} ({z['touches']}x, {z['src']})")
+        parts.append("  Support: " + zone_text(max(below, key=lambda z: z["high"])))
+    else:
+        lvl = math.floor(last / step) * step
+        if lvl >= last:
+            lvl -= step
+        parts.append(f"  Support: tidak ada zona di data, level bulat {fmt(lvl)}")
     return parts
 
 
@@ -332,8 +361,17 @@ def main():
             live = float(ex.fetch_ticker(symbol)["last"])
             daily = fetch_closed(ex, symbol, "1d")
             h4 = fetch_closed(ex, symbol, "4h")
-            zones = find_zones(daily) + load_manual_zones(name.split()[0])
-            summary, alert = evaluate(name, h4, zones)
+            weekly_zones = []
+            try:
+                weekly = fetch_closed(ex, symbol, "1w", limit=300)
+                weekly_zones = find_zones(weekly, k=3, width=0.5, min_touches=1)
+            except Exception as e:
+                print(f"{name} weekly gagal: {e}")
+            zones = merge_zones(
+                find_zones(daily) + weekly_zones + load_manual_zones(name.split()[0])
+            )
+            detect_zones = [z for z in zones if not z.get("weak")]
+            summary, alert = evaluate(name, h4, detect_zones)
             summaries.append(summary + f" | live {fmt(live)} [{ex.id}]")
             summaries.extend(nearest_zones(zones, live))
             if alert:
