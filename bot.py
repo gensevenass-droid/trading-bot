@@ -1,7 +1,6 @@
 import json
 import math
 import os
-import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 
@@ -44,6 +43,7 @@ MAX_RISK_PCT = 8.0
 DEFAULT_KURS = 16500.0
 DEFAULT_RISK = 1.0
 MAX_RISK_SETTING = 2.0
+SETTINGS_FILE = "settings.json"
 MARGIN_TARGET = 0.4
 MAX_LEV = 3
 FEE_ROUNDTRIP = 0.001
@@ -378,62 +378,80 @@ def get_kurs(st):
     return _KURS_CACHE["v"]
 
 
+def load_settings():
+    st = {"modal_idr": [1000000], "risk_pct": DEFAULT_RISK, "kurs_manual": None}
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE) as f:
+                data = json.load(f)
+            st.update({k: v for k, v in data.items() if k in st})
+        except Exception as e:
+            print(f"settings.json bermasalah: {e}")
+    modals = st["modal_idr"]
+    if isinstance(modals, (int, float)):
+        modals = [modals]
+    st["modal_idr"] = [float(m) for m in modals if isinstance(m, (int, float)) and m >= 10000][:5]
+    try:
+        st["risk_pct"] = min(max(float(st["risk_pct"]), 0.1), MAX_RISK_SETTING)
+    except (TypeError, ValueError):
+        st["risk_pct"] = DEFAULT_RISK
+    return st
+
+
 def position_guide(name, direction, entry, sl, tp1, tp2, st):
-    modal = st.get("modal_idr")
-    if not modal:
-        return "PANDUAN ENTRY: modal belum diatur.\nKirim ke bot ini: /modal 1500000"
+    modals = st.get("modal_idr") or []
+    if not modals:
+        return "PANDUAN ENTRY: isi daftar modal di settings.json."
     kurs, kurs_note = get_kurs(st)
     risk_pct = float(st.get("risk_pct", DEFAULT_RISK))
-    modal_usd = modal / kurs
-    risk_usd = modal_usd * risk_pct / 100
     dist = abs(entry - sl)
     dist_pct = dist / entry * 100
-    qty = risk_usd / dist
-    notional = qty * entry
+    gold = name.startswith("EMAS")
+    base = "PAXG" if gold else name.split()[0]
     lines = [
-        "PANDUAN ENTRY",
-        f"Modal: {rupiah(modal)} | risiko {risk_pct:g}% = {rupiah(modal * risk_pct / 100)}",
-        f"Kurs USDT: {kurs:,.0f} ({kurs_note})",
-        f"Jarak SL: {dist_pct:.2f}% dari entry",
+        f"PANDUAN ENTRY (risiko {risk_pct:g}% per transaksi)",
+        f"Kurs USDT: {kurs:,.0f} ({kurs_note}) | Jarak SL: {dist_pct:.2f}%",
     ]
-    lev = max(1, math.ceil(notional / (MARGIN_TARGET * modal_usd)))
-    if lev > MAX_LEV:
-        lines += [
-            "",
-            f"Posisi terlalu besar untuk modal ini (butuh leverage {lev}x, batas {MAX_LEV}x).",
-            "Lewati setup ini, atau kecilkan risiko dengan /risiko.",
-        ]
-        return "\n".join(lines)
-
-    margin = notional / lev
-    liq_pct = max(100 / lev - 0.5, 0)
-    safe = liq_pct >= 2 * dist_pct
-    fee = notional * FEE_ROUNDTRIP
-    loss = risk_usd + fee
-    gain1 = qty * abs(tp1 - entry) - fee
-    gain2 = qty * abs(tp2 - entry) - fee
-    base = "PAXG" if name.startswith("EMAS") else name.split()[0]
-
-    lines.append(f"Qty: {fmt_qty(qty)} {base}")
-    if name.startswith("EMAS"):
-        lot = qty / 100
-        lines.append(f"Setara XAUUSD: {lot:.4f} lot (1 lot = 100 oz)")
-        if lot < 0.01:
-            lines.append("Catatan: di bawah 0,01 lot (minimum umum broker forex). Pakai PAXG di exchange.")
+    for modal in modals:
+        modal_usd = modal / kurs
+        risk_usd = modal_usd * risk_pct / 100
+        qty = risk_usd / dist
+        notional = qty * entry
+        lev = max(1, math.ceil(notional / (MARGIN_TARGET * modal_usd)))
+        lines += ["", f"Modal {rupiah(modal)} (risiko {rupiah(modal * risk_pct / 100)})"]
+        if lev > MAX_LEV:
+            lines.append(f"  Terlalu besar untuk modal ini (butuh leverage {lev}x). Lewati.")
+            continue
+        margin = notional / lev
+        liq_pct = max(100 / lev - 0.5, 0)
+        safe = liq_pct >= 2 * dist_pct
+        fee = notional * FEE_ROUNDTRIP
+        loss = risk_usd + fee
+        gain1 = qty * abs(tp1 - entry) - fee
+        gain2 = qty * abs(tp2 - entry) - fee
+        lines.append(f"  Qty {fmt_qty(qty)} {base} | posisi {rupiah(notional * kurs)}")
+        lines.append(
+            f"  Leverage {lev}x | margin {rupiah(margin * kurs)} | likuidasi sekitar {liq_pct:.0f}%"
+            + ("" if safe else " (DEKAT SL!)")
+        )
+        lines.append(
+            f"  SL -{rupiah(loss * kurs)} | TP1 +{rupiah(gain1 * kurs)} | TP2 +{rupiah(gain2 * kurs)}"
+        )
+        if gold:
+            lot = qty / 100
+            lines.append(
+                f"  Setara {lot:.4f} lot XAUUSD"
+                + (" (di bawah 0,01 lot, pakai PAXG)" if lot < 0.01 else "")
+            )
+        if notional < 10:
+            lines.append("  Catatan: posisi di bawah sekitar 10 USDT, mungkin di bawah minimum order.")
     lines += [
-        f"Nilai posisi: {rupiah(notional * kurs)} ({notional:,.2f} USDT)",
-        f"Leverage: {lev}x, margin isolated {rupiah(margin * kurs)}",
-        f"Perkiraan likuidasi: sekitar {liq_pct:.0f}% dari entry "
-        + ("(jauh di luar SL)" if safe else "(DEKAT SL, kecilkan posisi!)"),
-        f"Jika kena SL: -{rupiah(loss * kurs)}",
-        f"Jika kena TP1: +{rupiah(gain1 * kurs)} | TP2: +{rupiah(gain2 * kurs)}",
-        f"(sudah termasuk estimasi fee {rupiah(fee * kurs)})",
+        "",
+        "Sudah termasuk estimasi fee. Likuidasi hanya perkiraan kasar.",
+        "Checklist: order Limit, SL dan TP terpasang, margin Isolated, cek berita besar.",
     ]
-    if notional < 10:
-        lines.append("Catatan: nilai posisi di bawah sekitar 10 USDT, mungkin di bawah minimum order exchange.")
     if direction == "short":
         lines.append("SHORT hanya bisa di futures atau margin, bukan spot.")
-    lines.append("Checklist: order Limit, SL dan TP terpasang, margin Isolated, cek berita besar.")
     return "\n".join(lines)
 
 
@@ -567,39 +585,6 @@ def send_photo(path, caption=""):
     resp.raise_for_status()
 
 
-def get_updates(offset):
-    r = requests.get(tg_url("getUpdates"), params={"offset": offset, "timeout": 0}, timeout=30)
-    r.raise_for_status()
-    return r.json().get("result", [])
-
-
-def parse_idr(txt):
-    t = txt.lower().replace("rp", "").replace(" ", "")
-    m = re.fullmatch(r"([\d.,]+)(jt|juta|rb|ribu|k)?", t)
-    if not m:
-        return None
-    num, suf = m.groups()
-    try:
-        if suf:
-            v = float(num.replace(",", "."))
-            return v * (1_000_000 if suf in ("jt", "juta") else 1_000)
-        digits = re.sub(r"[.,]", "", num)
-        return float(digits) if digits else None
-    except ValueError:
-        return None
-
-
-HELP = (
-    "PERINTAH BOT\n"
-    "/modal 1500000  (boleh 1,5jt atau 500rb)\n"
-    "/risiko 1  (persen per transaksi, maks 2)\n"
-    "/kurs 16500  atau  /kurs auto\n"
-    "/chart BTC  (BTC, ETH, SOL, BNB, EMAS)\n"
-    "/status\n"
-    "Perintah dibaca di run berikutnya, bisa tertunda beberapa menit."
-)
-
-
 def safe_reply(text):
     try:
         send_telegram(text)
@@ -607,86 +592,12 @@ def safe_reply(text):
         print(f"balasan gagal: {e}")
 
 
-def handle_commands(state, owner_id):
-    charts = []
-    try:
-        updates = get_updates(state.get("update_offset", 0))
-    except Exception as e:
-        print(f"getUpdates gagal: {e}")
-        return charts
-    st = state.setdefault("settings", {})
-    for u in updates:
-        state["update_offset"] = max(state.get("update_offset", 0), u["update_id"] + 1)
-        msg = u.get("message") or {}
-        if str(msg.get("chat", {}).get("id")) != str(owner_id):
-            continue
-        text = (msg.get("text") or "").strip()
-        if not text.startswith("/"):
-            continue
-        parts = text.split()
-        cmd = parts[0].split("@")[0].lower()
-        arg = " ".join(parts[1:])
-        if cmd in ("/start", "/bantuan", "/help"):
-            safe_reply(HELP)
-        elif cmd == "/modal":
-            v = parse_idr(arg)
-            if v is None or v < 10000:
-                safe_reply("Format: /modal 1500000 (atau 1,5jt / 500rb). Minimal Rp10.000.")
-            else:
-                st["modal_idr"] = v
-                rp = float(st.get("risk_pct", DEFAULT_RISK))
-                safe_reply(f"Modal diset {rupiah(v)}. Risiko {rp:g}% = {rupiah(v * rp / 100)} per transaksi.")
-        elif cmd == "/risiko":
-            try:
-                v = float(arg.replace(",", ".").replace("%", ""))
-            except ValueError:
-                safe_reply("Format: /risiko 1 (persen, antara 0,1 dan 2).")
-                continue
-            note = ""
-            if v > MAX_RISK_SETTING:
-                v, note = MAX_RISK_SETTING, " (dibatasi maksimal 2%)"
-            if v < 0.1:
-                v, note = 0.1, " (dinaikkan ke minimal 0,1%)"
-            st["risk_pct"] = v
-            safe_reply(f"Risiko per transaksi diset {v:g}%{note}.")
-        elif cmd == "/kurs":
-            if arg.lower() == "auto":
-                st.pop("kurs_manual", None)
-                safe_reply("Kurs kembali otomatis (Indodax, cadangan 16.500).")
-            else:
-                v = parse_idr(arg)
-                if v is None or not 5000 < v < 50000:
-                    safe_reply("Format: /kurs 16500 atau /kurs auto.")
-                else:
-                    st["kurs_manual"] = v
-                    safe_reply(f"Kurs USDT/IDR diset manual: {v:,.0f}.")
-        elif cmd == "/status":
-            kurs, note = get_kurs(st)
-            modal = st.get("modal_idr")
-            safe_reply(
-                "STATUS\n"
-                f"Modal: {rupiah(modal) if modal else 'belum diatur'}\n"
-                f"Risiko: {float(st.get('risk_pct', DEFAULT_RISK)):g}%\n"
-                f"Kurs: {kurs:,.0f} ({note})\n"
-                f"Sumber data: {PRIMARY} ({MARKET})"
-            )
-        elif cmd == "/chart":
-            key = ALIASES.get(arg.lower().strip())
-            if key:
-                charts.append(key)
-            else:
-                safe_reply("Aset tidak dikenal. Pilih: BTC, ETH, SOL, BNB, EMAS.")
-        else:
-            safe_reply("Perintah tidak dikenal. Kirim /bantuan.")
-    return charts
-
-
 def main():
     state = load_state()
     state.setdefault("alerts", {})
-    st = state.setdefault("settings", {})
-    owner = os.environ["TELEGRAM_CHAT_ID"]
-    chart_reqs = handle_commands(state, owner)
+    st = load_settings()
+    req = ALIASES.get(os.environ.get("CHART_REQUEST", "").strip().lower())
+    chart_reqs = [req] if req else []
 
     summaries = []
     assets = {}
@@ -765,7 +676,7 @@ def main():
             f"Sumber utama: {PRIMARY} ({MARKET}). Tanda [ ] = exchange yang dipakai per aset",
             "close H4 = harga penutupan candle terakhir, bukan harga live",
             f"Setup terkirim run ini: {sent}",
-            "Perintah: /modal /risiko /kurs /chart /status /bantuan",
+            "Modal dan risiko diatur di settings.json",
             "",
         ] + summaries
         send_telegram("\n".join(msg))
