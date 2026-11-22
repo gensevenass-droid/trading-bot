@@ -1,1 +1,40 @@
-[]
+[
+ {
+  "id": "SOL:short:pantulan:1795363200000",
+  "name": "SOL",
+  "direction": "short",
+  "kind": "pantulan",
+  "ts": 1795363200000,
+  "entry": 70.32,
+  "sl": 71.80357142857143,
+  "tp1": 68.09464285714284,
+  "tp2": 65.86928571428568,
+  "score": 5,
+  "exchange": "okx",
+  "created": "2026-11-22T20:41:37.924726+00:00",
+  "status": "open",
+  "r": null,
+  "resolved": null,
+  "tp1_hit": false,
+  "tp1_notified": false
+ },
+ {
+  "id": "BNB:short:pantulan:1795363200000",
+  "name": "BNB",
+  "direction": "short",
+  "kind": "pantulan",
+  "ts": 1795363200000,
+  "entry": 556.5,
+  "sl": 567.9835714285715,
+  "tp1": 539.2746428571427,
+  "tp2": 522.0492857142855,
+  "score": 5,
+  "exchange": "okx",
+  "created": "2026-11-22T20:41:40.928598+00:00",
+  "status": "open",
+  "r": null,
+  "resolved": null,
+  "tp1_hit": false,
+  "tp1_notified": false
+ }
+]

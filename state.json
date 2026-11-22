@@ -1,7 +1,9 @@
 {
   "alerts": {
     "ETH:short": 1795219200000,
-    "BNB:short": 1795219200000
+    "BNB:short": 1795219200000,
+    "SOL:short:pantulan": 1795363200000,
+    "BNB:short:pantulan": 1795363200000
   },
   "heartbeat": "2026-11-22",
   "settings": {},
