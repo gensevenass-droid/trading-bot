@@ -31,9 +31,9 @@
   "score": 5,
   "exchange": "okx",
   "created": "2026-11-22T20:41:40.928598+00:00",
-  "status": "open",
-  "r": null,
-  "resolved": null,
+  "status": "sl",
+  "r": -1.0,
+  "resolved": 1795435200000,
   "tp1_hit": false,
   "tp1_notified": false
  },
@@ -50,9 +50,9 @@
   "score": 5,
   "exchange": "okx",
   "created": "2026-11-23T08:33:34.603567+00:00",
-  "status": "open",
-  "r": null,
-  "resolved": null,
+  "status": "sl",
+  "r": -1.0,
+  "resolved": 1795435200000,
   "tp1_hit": false,
   "tp1_notified": false
  }
