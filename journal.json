@@ -55,5 +55,24 @@
   "resolved": 1795435200000,
   "tp1_hit": false,
   "tp1_notified": false
+ },
+ {
+  "id": "BTC:short:pantulan:1795449600000",
+  "name": "BTC",
+  "direction": "short",
+  "kind": "pantulan",
+  "ts": 1795449600000,
+  "entry": 61267.4,
+  "sl": 63658.83571428571,
+  "tp1": 57680.24642857144,
+  "tp2": 54093.09285714287,
+  "score": 4,
+  "exchange": "okx",
+  "created": "2026-11-23T20:23:26.985174+00:00",
+  "status": "open",
+  "r": null,
+  "resolved": null,
+  "tp1_hit": false,
+  "tp1_notified": false
  }
 ]
