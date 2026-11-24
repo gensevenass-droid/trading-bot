@@ -150,5 +150,24 @@
   "resolved": null,
   "tp1_hit": false,
   "tp1_notified": false
+ },
+ {
+  "id": "SOL:short:pantulan:1795536000000",
+  "name": "SOL",
+  "direction": "short",
+  "kind": "pantulan",
+  "ts": 1795536000000,
+  "entry": 69.02,
+  "sl": 70.84571428571428,
+  "tp1": 66.28142857142856,
+  "tp2": 63.542857142857144,
+  "score": 5,
+  "exchange": "okx",
+  "created": "2026-11-24T20:51:02.015397+00:00",
+  "status": "open",
+  "r": null,
+  "resolved": null,
+  "tp1_hit": false,
+  "tp1_notified": false
  }
 ]
