@@ -129,8 +129,8 @@
   "status": "open",
   "r": null,
   "resolved": null,
-  "tp1_hit": false,
-  "tp1_notified": false
+  "tp1_hit": true,
+  "tp1_notified": true
  },
  {
   "id": "BNB:short:pantulan:1795492800000",
