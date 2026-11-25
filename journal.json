@@ -72,8 +72,8 @@
   "status": "open",
   "r": null,
   "resolved": null,
-  "tp1_hit": false,
-  "tp1_notified": false
+  "tp1_hit": true,
+  "tp1_notified": true
  },
  {
   "id": "BTC:short:pantulan:1795492800000",
@@ -88,9 +88,9 @@
   "score": 4,
   "exchange": "okx",
   "created": "2026-11-24T08:59:47.335587+00:00",
-  "status": "open",
-  "r": null,
-  "resolved": null,
+  "status": "tp2",
+  "r": 2.25,
+  "resolved": 1795608000000,
   "tp1_hit": true,
   "tp1_notified": true
  },
@@ -126,9 +126,9 @@
   "score": 5,
   "exchange": "okx",
   "created": "2026-11-24T08:59:53.941192+00:00",
-  "status": "open",
-  "r": null,
-  "resolved": null,
+  "status": "tp2",
+  "r": 2.25,
+  "resolved": 1795608000000,
   "tp1_hit": true,
   "tp1_notified": true
  },
@@ -167,8 +167,8 @@
   "status": "open",
   "r": null,
   "resolved": null,
-  "tp1_hit": false,
-  "tp1_notified": false
+  "tp1_hit": true,
+  "tp1_notified": true
  },
  {
   "id": "BTC:short:pantulan:1795564800000",
@@ -186,8 +186,8 @@
   "status": "open",
   "r": null,
   "resolved": null,
-  "tp1_hit": false,
-  "tp1_notified": false
+  "tp1_hit": true,
+  "tp1_notified": true
  },
  {
   "id": "ETH:short:pantulan:1795564800000",
@@ -205,8 +205,8 @@
   "status": "open",
   "r": null,
   "resolved": null,
-  "tp1_hit": false,
-  "tp1_notified": false
+  "tp1_hit": true,
+  "tp1_notified": true
  },
  {
   "id": "BNB:short:pantulan:1795564800000",
@@ -224,7 +224,7 @@
   "status": "open",
   "r": null,
   "resolved": null,
-  "tp1_hit": false,
-  "tp1_notified": false
+  "tp1_hit": true,
+  "tp1_notified": true
  }
 ]
