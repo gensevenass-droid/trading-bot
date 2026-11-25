@@ -91,8 +91,8 @@
   "status": "open",
   "r": null,
   "resolved": null,
-  "tp1_hit": false,
-  "tp1_notified": false
+  "tp1_hit": true,
+  "tp1_notified": true
  },
  {
   "id": "ETH:short:pantulan:1795492800000",
@@ -148,8 +148,8 @@
   "status": "open",
   "r": null,
   "resolved": null,
-  "tp1_hit": false,
-  "tp1_notified": false
+  "tp1_hit": true,
+  "tp1_notified": true
  },
  {
   "id": "SOL:short:pantulan:1795536000000",
