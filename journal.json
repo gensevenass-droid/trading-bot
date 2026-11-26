@@ -226,5 +226,24 @@
   "resolved": 1795622400000,
   "tp1_hit": true,
   "tp1_notified": true
+ },
+ {
+  "id": "ETH:short:pantulan:1795665600000",
+  "name": "ETH",
+  "direction": "short",
+  "kind": "pantulan",
+  "ts": 1795665600000,
+  "entry": 1689.62,
+  "sl": 1724.7250000000001,
+  "tp1": 1636.9624999999996,
+  "tp2": 1584.3049999999992,
+  "score": 4,
+  "exchange": "okx",
+  "created": "2026-11-26T09:02:56.172816+00:00",
+  "status": "open",
+  "r": null,
+  "resolved": null,
+  "tp1_hit": false,
+  "tp1_notified": false
  }
 ]
