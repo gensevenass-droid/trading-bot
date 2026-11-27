@@ -278,9 +278,9 @@
   "score": 4,
   "exchange": "okx",
   "created": "2026-11-27T05:08:29.024058+00:00",
-  "status": "open",
-  "r": null,
-  "resolved": null,
+  "status": "sl",
+  "r": -1.0,
+  "resolved": 1795780800000,
   "tp1_hit": false,
   "tp1_notified": false
  }
