@@ -283,5 +283,43 @@
   "resolved": 1795780800000,
   "tp1_hit": false,
   "tp1_notified": false
+ },
+ {
+  "id": "SOL:short:pantulan:1795838400000",
+  "name": "SOL",
+  "direction": "short",
+  "kind": "pantulan",
+  "ts": 1795838400000,
+  "entry": 71.26,
+  "sl": 72.47642857142857,
+  "tp1": 69.43535714285716,
+  "tp2": 67.61071428571431,
+  "score": 5,
+  "exchange": "okx",
+  "created": "2026-11-28T08:29:11.400533+00:00",
+  "status": "open",
+  "r": null,
+  "resolved": null,
+  "tp1_hit": false,
+  "tp1_notified": false
+ },
+ {
+  "id": "BNB:short:pantulan:1795838400000",
+  "name": "BNB",
+  "direction": "short",
+  "kind": "pantulan",
+  "ts": 1795838400000,
+  "entry": 552.34,
+  "sl": 560.3221428571429,
+  "tp1": 540.3667857142857,
+  "tp2": 528.3935714285714,
+  "score": 6,
+  "exchange": "okx",
+  "created": "2026-11-28T08:29:14.400056+00:00",
+  "status": "open",
+  "r": null,
+  "resolved": null,
+  "tp1_hit": false,
+  "tp1_notified": false
  }
 ]
